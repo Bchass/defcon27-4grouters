@@ -1,5 +1,3 @@
-#!/usr/bin/python
-
 import sys
 import re
 
@@ -12,20 +10,22 @@ from termcolor import colored
 
 from Crypto.Cipher import AES
 
+from Crypto.Util.Padding import pad
+
 DEBUG_ON = True
 
 def debug_log(string):
 	if DEBUG_ON:
-		print colored("[DBG] ", "white", attrs=["bold"]) + string
+		print (colored("[DBG] ", "white", attrs=["bold"]) + string)
 
 def log(string):
-	print colored("[LOG] ", "green", attrs=["bold"]) + string
+	print (colored("[LOG] ", "green", attrs=["bold"]) + string)
 
 def dexor(text, key):
 	ret = list(text)
 	mod = len(key)
 	for index, char in enumerate(ret):
-		ret[index] = chr(ord(char) ^ ord(key[index % mod]))
+		ret[index] = chr(char ^ key[index % mod])
 	return "".join(ret)
 
 def substring_indexes(substring, string):
@@ -44,13 +44,13 @@ def hexdump_head(string, howmanylines):
 def hexdump(src, length=16, sep='.'):
 	FILTER = ''.join([(len(repr(chr(x))) == 3) and chr(x) or sep for x in range(256)])
 	lines = []
-	for c in xrange(0, len(src), length):
+	for c in range(0, len(src), length):
 		chars = src[c:c+length]
-		hex = ' '.join(["%02x" % ord(x) for x in chars])
-		if len(hex) > 24:
-			hex = "%s %s" % (hex[:24], hex[24:])
-		printable = ''.join(["%s" % ((ord(x) <= 127 and FILTER[ord(x)]) or sep) for x in chars])
-		lines.append("%08x:  %-*s  |%s|\n" % (c, length*3, hex, printable))
+		hex_str = ' '.join(["%02x" % x for x in chars])
+		if len(hex_str) > 24:
+			hex_str = "%s %s" % (hex_str[:24], hex_str[24:])
+		printable = ''.join(["%s" % ((x <= 127 and FILTER[x]) or sep) for x in chars])
+		lines.append("%08x:  %-*s  |%s|\n" % (c, length*3, hex_str, printable))
 	return ''.join(lines)
 
 def parse_header(header):
@@ -77,8 +77,23 @@ def nn(number):
 	else:
 		return number
 
-def split_key(key, padding, index):
-	final_key = ""
+def n_encode(byte_data, encoding='utf-8'):
+	try:
+		return byte_data.encode(encoding)
+	except Exception as e:
+		log(f"Decoding error: {e}")
+		return ""
+
+def n_decode(byte_data, encoding='utf-8', errors='ignore'):
+	try:
+		return byte_data.decode(encoding, errors=errors)
+	except Exception as e:
+		log(f"Decoding error: {e}")
+		return ""
+
+def log_hex(data, label):
+	hex_data = binascii.hexlify(data).decode('utf-8')
+	debug_log(f"{label}: {hex_data}")
 
 parser = argparse.ArgumentParser()
 parser.add_argument('filename')
@@ -104,12 +119,13 @@ subsection_dir = os.path.join(firmware_dir, "_subsections")
 if not os.path.exists(subsection_dir):
 	os.makedirs(subsection_dir)
 
-aes_key 	= ""
+aes_key 	= b''
 
 telltale_sign = "\x80\x40\x4C\x21\x51\x9B\xFD\xC5\xCD\xFF\x2E\xD3\x66\x0B\x8F\x6E"
 
-key_32 		= ''
-key_padding = ''
+key_32 = b''
+ 
+key_padding = b''
 
 just_headers_filename = os.path.join(firmware_dir, "_justheaders_hexdump.bin")
 just_headers_buffer = ""
@@ -126,7 +142,7 @@ firmware_file.close()
 
 log("file is " + hex(file_total_size) + " long")
 
-aes = AES.new(aes_key, AES.MODE_ECB, "")
+aes = AES.new(aes_key, AES.MODE_ECB)
 
 # firmware headers always seem to be 0x190 long
 header_size = 0x190
@@ -137,7 +153,7 @@ fwhead_decd = aes.decrypt(firmware_header)
 just_headers_buffer += "0x0 " + "-"*32 + "\n"
 just_headers_buffer += hexdump(fwhead_decd)
 
-full_decrypted_file += fwhead_decd
+full_decrypted_file += n_decode(fwhead_decd)
 
 main_header_filename = os.path.join(subsection_dir, nn(global_counter) + "_0x0-" + hex(header_size) + ".dec.bin")
 with open(main_header_filename, "wb") as f:
@@ -145,7 +161,7 @@ with open(main_header_filename, "wb") as f:
 
 global_counter += 1
 
-parts = list(map(''.join, zip(*[iter(fwhead_decd)]*16)))
+parts = list(map(''.join, zip(*[iter(map(chr, fwhead_decd))]*16)))
 chunk_index = {}
 
 i = 0
@@ -153,8 +169,8 @@ for line in parts:
 	if line[12:17] == "BASE":
 		chunk_index[i] = {}
 		chunk_index[i]["number"] = i
-		chunk_index[i]["start"] = int(binascii.hexlify(line[4:8]), 16)
-		chunk_index[i]["length"] = int(binascii.hexlify(line[8:12]), 16)
+		chunk_index[i]["start"] = int(binascii.hexlify(n_encode(line[4:8])), 16)
+		chunk_index[i]["length"] = int(binascii.hexlify(n_encode(line[8:12])), 16)
 		chunk_index[i]["end"] = chunk_index[i]["start"] + chunk_index[i]["length"]
 		log("chunk start: " + hex(chunk_index[i]["start"]) + ", length " + hex(chunk_index[i]["length"]) + ", end " + hex(chunk_index[i]["end"]))
 		
@@ -167,7 +183,9 @@ for line in parts:
 		pad_front = key_padding[key_end::]
 		pad_end = key_padding[0:key_end]
 
-		debug_log("key start: " + binascii.hexlify(pad_front) + ", key end: " + binascii.hexlify(pad_end))
+		log_hex(pad_front, "key start")
+		log_hex(pad_end, "key end")
+
 		chunk_index[i]["key"] = pad_front + key_32 + pad_end
 
 		i += 1
@@ -176,20 +194,20 @@ for chunk in chunk_index.values():
 	number = str(chunk["number"])
 	this_chunk = firmware[chunk["start"]:chunk["end"]]
 
-	debug_log("starting chunk " + number + "_" + hex(chunk["start"]) + "-" + hex(chunk["end"]))
+	debug_log(f"starting chunk {number}_{hex(chunk['start'])}-{hex(chunk['end'])}")
 
 	header_contents = this_chunk[0:header_size]
 
 	dec_header = aes.decrypt(header_contents)
 	main_type = type_from_header(dec_header)
 
-	log("MAIN TYPE: " + main_type)
+	log(f"MAIN TYPE: " + n_decode(main_type))
 	just_headers_buffer += hex(chunk["start"]) + " " + "-"*32 + "\n"
 	just_headers_buffer += hexdump(dec_header)
 
-	full_decrypted_file += dec_header
+	full_decrypted_file += n_decode(dec_header)
 
-	main_header_filename = os.path.join(subsection_dir, nn(global_counter) + "_" + main_type + ".dec.bin")
+	main_header_filename = os.path.join(subsection_dir, nn(global_counter) + "_" + n_decode(main_type) + ".dec.bin")
 	with open(main_header_filename, "wb") as f:
 		f.write(dec_header)
 
@@ -228,17 +246,17 @@ for chunk in chunk_index.values():
 
 		for subheader_base in subheaders_list:
 			
-			subheader_contents = dec_body[subheader_base:subheader_base+header_size]
-			dec_subheader = aes.decrypt(subheader_contents)
+			padded_subheader_contents = pad(header_contents, AES.block_size)
+			dec_subheader = aes.decrypt(padded_subheader_contents)
 			just_headers_buffer += hex(chunk["start"]+subheader_base) + " " + "-"*32 + "\n"
 			just_headers_buffer += hexdump(dec_subheader)
-			full_decrypted_file += dec_subheader
+			full_decrypted_file += n_decode(dec_subheader)
 
 			subchunk_len = length_from_header(dec_subheader)
 			sub_type = type_from_header(dec_subheader)
 
 			debug_log("\tsub-chunk header at " + hex(subheader_base) + ", lenth: " + hex(subchunk_len))
-			log("\tSUB TYPE: " + sub_type)
+			log("\tSUB TYPE: " + n_decode(sub_type))
 
 
 			subchunk_body_start = subheader_base + 0x190
@@ -246,7 +264,7 @@ for chunk in chunk_index.values():
 
 			subchunk_body = dec_body[subchunk_body_start:subchunk_body_end]
 
-			dec_subheader_filename = os.path.join(subsection_dir, nn(global_counter) + "_" + main_type + "_" + sub_type + ".dec.bin")
+			dec_subheader_filename = os.path.join(subsection_dir, nn(global_counter) + "_" + n_decode(main_type) + "_" + n_decode(sub_type)+ ".dec.bin")
 
 			with open(dec_subheader_filename, "wb") as f:
 				debug_log("writing " + dec_subheader_filename)
@@ -254,12 +272,12 @@ for chunk in chunk_index.values():
 
 			global_counter += 1
 
-			dec_subchunk_filename = os.path.join(subsection_dir, nn(global_counter) + "_" + main_type + "_" + sub_type + ".dec.bin")
+			dec_subchunk_filename = os.path.join(subsection_dir, nn(global_counter) + "_" + n_decode(main_type) + "_" + n_decode(sub_type) + ".dec.bin")
 
 
 			with open(dec_subchunk_filename, "wb") as f:
 				debug_log("writing " + dec_subchunk_filename)
-				f.write(subchunk_body)
+				f.write(n_encode(subchunk_body))
 
 			global_counter += 1
 
@@ -268,21 +286,19 @@ for chunk in chunk_index.values():
 
 	else:
 		full_decrypted_file += dec_body
-
-		dec_chunk_filename = os.path.join(subsection_dir, nn(global_counter) + "_" + main_type + ".dec.bin")
+		dec_chunk_filename = os.path.join(subsection_dir, nn(global_counter) + "_" +  n_decode(main_type) + ".dec.bin")
 
 		# start writing the decrypted stuff
 		log("writing decrypted chunk to " + dec_chunk_filename)
 		with open(dec_chunk_filename, "wb") as f:
-			f.write(dec_body)
+			f.write(n_encode(dec_body))
 
 		global_counter += 1
 
 log("writing just headers to " + just_headers_filename)
 with open(just_headers_filename, "wb") as f:
-	f.write(just_headers_buffer)
+	f.write(n_encode(just_headers_buffer))
 
 log("writing full decrypted file to " + full_decrypted_filename)
 with open(full_decrypted_filename, "wb") as f:
-	f.write(full_decrypted_file)
-
+	f.write(n_encode(full_decrypted_file))
